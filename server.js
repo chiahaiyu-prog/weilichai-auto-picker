@@ -21,6 +21,12 @@ function parseNumbers(text) {
     .filter(n => n >= 1 && n <= 38);
 }
 
+function uniq(arr) {
+  return [...new Set(arr.map(Number))]
+    .filter(n => n >= 1 && n <= 38)
+    .sort((a, b) => a - b);
+}
+
 async function supabaseFetch(path, options = {}) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("缺少 SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY");
@@ -38,7 +44,10 @@ async function supabaseFetch(path, options = {}) {
   });
 
   const text = await res.text();
-  if (!res.ok) throw new Error(`Supabase 錯誤 ${res.status}: ${text}`);
+
+  if (!res.ok) {
+    throw new Error(`Supabase 錯誤 ${res.status}: ${text}`);
+  }
 
   try {
     return text ? JSON.parse(text) : [];
@@ -49,10 +58,14 @@ async function supabaseFetch(path, options = {}) {
 
 async function fetchPilioRows() {
   const res = await fetch(PILIO_URL + "?t=" + Date.now(), {
-    headers: { "user-agent": "Mozilla/5.0" }
+    headers: {
+      "user-agent": "Mozilla/5.0"
+    }
   });
 
-  if (!res.ok) throw new Error("Pilio 抓取失敗：" + res.status);
+  if (!res.ok) {
+    throw new Error("Pilio 抓取失敗：" + res.status);
+  }
 
   const html = await res.text();
   const $ = cheerio.load(html);
@@ -63,23 +76,35 @@ async function fetchPilioRows() {
 
   for (const seq of seqs) {
     const nums = parseNumbers(seq).slice(0, 6);
+
     if (nums.length === 6) {
       const key = nums.join(",");
-      if (!rows.some(r => r.key === key)) rows.push({ key, nums });
+      if (!rows.some(r => r.key === key)) {
+        rows.push({ key, nums });
+      }
     }
+
     if (rows.length >= 9) break;
   }
 
-  if (rows.length < 9) throw new Error("Pilio 1～9期沒有完整抓到");
+  if (rows.length < 9) {
+    throw new Error("Pilio 1～9期沒有完整抓到");
+  }
+
   return rows.map(r => r.nums);
 }
 
 async function fetchBigaHtml() {
   const res = await fetch(BIGA_URL + "?t=" + Date.now(), {
-    headers: { "user-agent": "Mozilla/5.0" }
+    headers: {
+      "user-agent": "Mozilla/5.0"
+    }
   });
 
-  if (!res.ok) throw new Error("Biga 抓取失敗：" + res.status);
+  if (!res.ok) {
+    throw new Error("Biga 抓取失敗：" + res.status);
+  }
+
   return await res.text();
 }
 
@@ -92,14 +117,21 @@ function parseBigaRows(html) {
     if (tds.length < 4) return;
 
     const firstText = $(tds[0]).text().replace(/\s+/g, "").trim();
+
     if (!firstText.startsWith("開")) return;
 
     const open = parseInt(firstText.replace("開", ""), 10);
     const tails = parseNumbers($(tds[2]).text()).map(n => n % 10);
     const hotCell = $(tds[3]);
+
     const nums = parseNumbers(hotCell.text()).slice(0, 6);
 
-    if (open >= 1 && open <= 38 && tails.length >= 1 && nums.length === 6) {
+    if (
+      open >= 1 &&
+      open <= 38 &&
+      tails.length >= 1 &&
+      nums.length === 6
+    ) {
       rows.push({
         open,
         tails: [...new Set(tails)],
@@ -118,7 +150,9 @@ function getYellowRows(bigaRows) {
 }
 
 async function loadPermanentStats() {
-  const rows = await supabaseFetch("red_position_stats?select=position,count&order=position.asc");
+  const rows = await supabaseFetch(
+    "red_position_stats?select=position,count&order=position.asc"
+  );
 
   const stats = [0, 0, 0, 0, 0, 0];
 
@@ -143,6 +177,7 @@ function getRedHitsFromRow(row) {
 
   $("*").each((_, el) => {
     const node = $(el);
+
     const style = String(node.attr("style") || "").toLowerCase();
     const cls = String(node.attr("class") || "").toLowerCase();
 
@@ -155,6 +190,8 @@ function getRedHitsFromRow(row) {
       style.includes("rgb(255, 0, 0)") ||
       style.includes("background:red") ||
       style.includes("background-color:red") ||
+      style.includes("background: red") ||
+      style.includes("background-color: red") ||
       cls.includes("red");
 
     if (!isRed) return;
@@ -172,7 +209,6 @@ function getRedHitsFromRow(row) {
 
   return hits;
 }
-
 async function updatePermanentRedStats(bigaRows) {
   const stats = await loadPermanentStats();
   const seen = await loadSeenKeys();
@@ -182,6 +218,7 @@ async function updatePermanentRedStats(bigaRows) {
 
   reviewRows.forEach(row => {
     const rowKey = `${row.open}-${row.nums.join(",")}`;
+
     if (seen.has(rowKey)) return;
 
     const hits = getRedHitsFromRow(row);
@@ -242,7 +279,9 @@ function getCircleDelete(yellowRows) {
 
     positions.forEach(pos => {
       const n = row.nums[pos];
-      if (n >= 1 && n <= 38) del.add(n);
+      if (n >= 1 && n <= 38) {
+        del.add(n);
+      }
     });
   });
 
@@ -261,13 +300,21 @@ function pickYellow4(yellowRows, banned, redStats) {
       score[n] += 10;
       score[n] += (redStats[posIndex] || 0) * 8;
 
-      if (row.tails.includes(n % 10)) score[n] += 5;
-      if (rowIndex >= 3) score[n] += 2;
+      if (row.tails.includes(n % 10)) {
+        score[n] += 5;
+      }
+
+      if (rowIndex >= 3) {
+        score[n] += 2;
+      }
     });
   });
 
   return Object.entries(score)
-    .map(([num, s]) => ({ num: Number(num), score: s }))
+    .map(([num, s]) => ({
+      num: Number(num),
+      score: s
+    }))
     .sort((a, b) => b.score - a.score || a.num - b.num)
     .slice(0, 4)
     .map(x => x.num)
@@ -294,9 +341,14 @@ function pickOutside2(remaining, yellowRows, latest3) {
       score += n >= 11 && n <= 30 ? 4 : 2;
       score += n % 2 === 1 ? 2 : 1;
 
-      if (!recentSet.has(n)) score += 3;
+      if (!recentSet.has(n)) {
+        score += 3;
+      }
 
-      return { num: n, score };
+      return {
+        num: n,
+        score
+      };
     })
     .sort((a, b) => b.score - a.score || a.num - b.num)
     .slice(0, 2)
@@ -316,7 +368,10 @@ function analyze(pilioRows, yellowRows, redStats) {
   const ninth = pilioRows[8] || [];
 
   const plusDelete = new Set(
-    latest3.flat().map(n => n + 1).filter(n => n >= 1 && n <= 38)
+    latest3
+      .flat()
+      .map(n => n + 1)
+      .filter(n => n >= 1 && n <= 38)
   );
 
   const banned = new Set([
@@ -368,7 +423,11 @@ body{
   box-shadow:0 25px 80px rgba(0,0,0,.35);
   backdrop-filter:blur(14px);
 }
-h1{text-align:center;font-size:30px;margin:8px 0 16px}
+h1{
+  text-align:center;
+  font-size:30px;
+  margin:8px 0 16px;
+}
 button{
   width:100%;
   padding:18px;
@@ -395,9 +454,21 @@ button{
   background:rgba(255,255,255,.9);
   color:#8a004c;
 }
-.title{font-size:22px;font-weight:900;margin-bottom:12px}
-.sub{font-size:16px;font-weight:900;margin:12px 0 8px}
-.balls{display:flex;flex-wrap:wrap;gap:10px}
+.title{
+  font-size:22px;
+  font-weight:900;
+  margin-bottom:12px;
+}
+.sub{
+  font-size:16px;
+  font-weight:900;
+  margin:12px 0 8px;
+}
+.balls{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+}
 .ball{
   width:54px;
   height:54px;
@@ -411,10 +482,18 @@ button{
   font-weight:900;
 }
 .ball.gray{background:#666}
-.ball.yellow{background:#ffd400;color:#2b1a00}
+.ball.yellow{
+  background:#ffd400;
+  color:#2b1a00;
+}
 .ball.blue{background:#1d8cff}
 .ball.green{background:#00a86b}
-.small{text-align:center;font-size:14px;line-height:1.7;margin-bottom:10px}
+.small{
+  text-align:center;
+  font-size:14px;
+  line-height:1.7;
+  margin-bottom:10px;
+}
 </style>
 </head>
 <body>
@@ -432,10 +511,15 @@ button{
 </div>
 
 <script>
-function pad(n){ return String(n).padStart(2,"0"); }
+function pad(n){
+  return String(n).padStart(2,"0");
+}
 
 function balls(arr, cls=""){
-  if(!arr || arr.length === 0) return "<div>無</div>";
+  if(!arr || arr.length === 0){
+    return "<div>無</div>";
+  }
+
   return '<div class="balls">' +
     arr.map(n => '<div class="ball '+cls+'">' + pad(n) + '</div>').join("") +
   '</div>';
@@ -448,12 +532,17 @@ async function run(){
   try{
     const res = await fetch("/api/analyze",{
       method:"POST",
-      headers:{ "Content-Type":"application/json" },
+      headers:{
+        "Content-Type":"application/json"
+      },
       body:JSON.stringify({})
     });
 
     const data = await res.json();
-    if(data.error) throw new Error(data.detail || data.error);
+
+    if(data.error){
+      throw new Error(data.detail || data.error);
+    }
 
     let html = "";
 
@@ -516,7 +605,9 @@ async function runAnalyze(res) {
     const yellowRows = getYellowRows(bigaRows);
     const redStats = await updatePermanentRedStats(bigaRows);
 
-    res.json(analyze(pilioRows, yellowRows, redStats));
+    const result = analyze(pilioRows, yellowRows, redStats);
+
+    res.json(result);
   } catch (err) {
     res.status(500).json({
       error: "分析失敗",
