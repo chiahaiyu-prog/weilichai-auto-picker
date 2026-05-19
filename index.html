@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>威力彩自動抓牌版</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;min-height:100vh;padding:16px;
+  font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC","PingFang TC",Arial,sans-serif;
+  color:#fff;
+  background:
+    radial-gradient(circle at 15% 8%,rgba(255,255,255,.98),rgba(255,210,238,.85) 9%,transparent 28%),
+    radial-gradient(circle at 88% 16%,rgba(255,45,166,.82),transparent 30%),
+    linear-gradient(135deg,#ff0f89 0%,#ff65bf 48%,#ffc5e6 100%);
+}
+.card{
+  max-width:620px;margin:auto;padding:20px;border-radius:34px;
+  background:rgba(255,255,255,.20);border:1px solid rgba(255,255,255,.42);
+  box-shadow:0 26px 80px rgba(180,0,95,.34),inset 0 0 38px rgba(255,255,255,.22);
+  backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+}
+h1{text-align:center;margin:6px 0 8px;font-size:28px;text-shadow:0 0 22px rgba(255,255,255,.85)}
+.sub{text-align:center;font-weight:800;opacity:.95;margin-bottom:15px}
+.panel{margin-top:15px;padding:13px;border-radius:24px;background:rgba(255,255,255,.19);border:1px solid rgba(255,255,255,.25)}
+.title{font-weight:950;font-size:17px;margin-bottom:10px}
+.grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.num{
+  aspect-ratio:1/1;border-radius:999px;border:1px solid rgba(255,255,255,.42);
+  background:rgba(255,255,255,.28);color:white;font-size:16px;font-weight:950;
+}
+.num.active{background:#fff;color:#ff168d;box-shadow:0 0 22px rgba(255,255,255,.92);transform:scale(1.04)}
+.btn{
+  width:100%;padding:17px;border:0;border-radius:24px;font-size:19px;font-weight:950;
+  color:#ff168d;background:#fff;margin-top:14px;box-shadow:0 0 30px rgba(255,255,255,.82)
+}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.small{font-size:13px;opacity:.95;line-height:1.7}
+.balls,.comboBalls{display:flex;flex-wrap:wrap;gap:9px;justify-content:center}
+.ball{
+  width:52px;height:52px;border-radius:999px;background:#fff;color:#ff168d;
+  font-size:21px;font-weight:950;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 0 22px rgba(255,255,255,.9)
+}
+.combo{margin-top:12px;padding:12px;border-radius:22px;background:rgba(255,255,255,.20)}
+.comboTitle{font-weight:950;margin-bottom:10px;text-align:center}
+.status{text-align:center;font-weight:900;margin:12px 0;opacity:.95}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>威力彩自動抓牌版</h1>
+  <div class="sub">自動更新大A網資料・刪除後抓 10 組</div>
+
+  <div class="row">
+    <button class="btn" onclick="autoAnalyze()">自動更新抓牌</button>
+    <button class="btn" onclick="manualAnalyze()">手動號碼抓牌</button>
+  </div>
+
+  <div class="panel">
+    <div class="title">手動排除號碼</div>
+    <div class="grid" id="excludeGrid"></div>
+  </div>
+
+  <div class="panel">
+    <div class="title">最近三期資料</div>
+    <div id="latest" class="small">按「自動更新抓牌」後顯示</div>
+  </div>
+
+  <div class="panel">
+    <div class="title">剩下號碼</div>
+    <div id="remaining" class="balls"></div>
+  </div>
+
+  <div class="panel">
+    <div class="title">10 組頭獎感覺</div>
+    <div id="combos"></div>
+  </div>
+
+  <div id="status" class="status"></div>
+</div>
+
+<script>
+const excluded = new Set();
+function pad(n){return String(n).padStart(2,"0")}
+function ball(n){return `<div class="ball">${pad(n)}</div>`}
+
+function buildExclude(){
+  const ex=document.getElementById("excludeGrid");
+  for(let n=1;n<=38;n++){
+    const b=document.createElement("button");
+    b.className="num"; b.textContent=pad(n);
+    b.onclick=()=>{
+      if(excluded.has(n)){excluded.delete(n); b.classList.remove("active")}
+      else{excluded.add(n); b.classList.add("active")}
+    };
+    ex.appendChild(b);
+  }
+}
+
+function showResult(data){
+  document.getElementById("latest").innerHTML =
+    data.latest3.map((x,i)=>`第${i+1}期：${x.map(pad).join("、")}`).join("<br>");
+
+  document.getElementById("remaining").innerHTML =
+    data.remaining.map(ball).join("");
+
+  document.getElementById("combos").innerHTML =
+    data.combos.map((c,i)=>`
+      <div class="combo">
+        <div class="comboTitle">第 ${i+1} 組</div>
+        <div class="comboBalls">${c.map(ball).join("")}</div>
+      </div>
+    `).join("");
+}
+
+async function autoAnalyze(){
+  document.getElementById("status").innerText="正在抓大A網資料...";
+  try{
+    const res = await fetch("/api/analyze",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({manualExclude:[...excluded]})
+    });
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+    showResult(data);
+    document.getElementById("status").innerText="已自動更新完成";
+  }catch(e){
+    document.getElementById("status").innerText="自動抓取失敗，可先用手動號碼版";
+    alert("自動抓取失敗：" + e.message);
+  }
+}
+
+function manualAnalyze(){
+  const input = prompt("貼最近三期，每期6碼，用換行分開：\n例：06 07 14 25 29 34\n06 08 09 17 21 29\n15 19 23 26 31 38");
+  if(!input) return;
+  const rows = input.split(/\n+/).map(line =>
+    (line.match(/\d{1,2}/g)||[]).map(x=>parseInt(x,10)).filter(n=>n>=1&&n<=38).slice(0,6)
+  ).filter(x=>x.length>=6).slice(0,3);
+  if(rows.length<3){ alert("請貼三期，每期6個號碼"); return; }
+
+  fetch("/api/analyze",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({latest3:rows,manualExclude:[...excluded]})
+  }).then(r=>r.json()).then(showResult).catch(e=>alert(e.message));
+}
+
+buildExclude();
+</script>
+</body>
+</html>
