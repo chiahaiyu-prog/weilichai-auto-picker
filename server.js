@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import * as cheerio from "cheerio";
+import fs from "fs";
 
 const app = express();
 app.use(cors());
@@ -11,6 +12,7 @@ const PORT = process.env.PORT || 3000;
 
 const PILIO_URL = "https://www.pilio.idv.tw/lto/list.asp";
 const BIGA_URL = "https://biga.com.tw/TOWMSG/showtowmsg_weili";
+const MEMORY_FILE = "./red-position-memory.json";
 
 function parseNumbers(text) {
   return (String(text).match(/\b\d{1,2}\b/g) || [])
@@ -18,8 +20,25 @@ function parseNumbers(text) {
     .filter(n => n >= 1 && n <= 38);
 }
 
+function readMemory() {
+  try {
+    if (!fs.existsSync(MEMORY_FILE)) {
+      return { stats: [0, 0, 0, 0, 0, 0], seenKeys: [] };
+    }
+    return JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
+  } catch {
+    return { stats: [0, 0, 0, 0, 0, 0], seenKeys: [] };
+  }
+}
+
+function saveMemory(memory) {
+  try {
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
+  } catch {}
+}
+
 async function fetchPilioRows() {
-  const res = await fetch(PILIO_URL, {
+  const res = await fetch(PILIO_URL + "?t=" + Date.now(), {
     headers: { "user-agent": "Mozilla/5.0" }
   });
 
@@ -46,7 +65,7 @@ async function fetchPilioRows() {
 }
 
 async function fetchBigaHtml() {
-  const res = await fetch(BIGA_URL, {
+  const res = await fetch(BIGA_URL + "?t=" + Date.now(), {
     headers: { "user-agent": "Mozilla/5.0" }
   });
 
@@ -54,7 +73,7 @@ async function fetchBigaHtml() {
   return await res.text();
 }
 
-function fetchLatestBigaYellowRowsFromHtml(html) {
+function parseBigaRows(html) {
   const $ = cheerio.load(html);
   const rows = [];
 
@@ -67,65 +86,85 @@ function fetchLatestBigaYellowRowsFromHtml(html) {
 
     const open = parseInt(firstText.replace("開", ""), 10);
     const tails = parseNumbers($(tds[2]).text()).map(n => n % 10);
-    const nums = parseNumbers($(tds[3]).text()).slice(0, 6);
+    const hotCell = $(tds[3]);
+    const nums = parseNumbers(hotCell.text()).slice(0, 6);
 
     if (open >= 1 && open <= 38 && tails.length >= 1 && nums.length === 6) {
       rows.push({
         open,
         tails: [...new Set(tails)],
-        nums
+        nums,
+        hotCell
       });
     }
-
-    if (rows.length >= 6) return false;
   });
 
   return rows;
 }
 
-function getRedPositionStatsFromBigaHtml(html) {
-  const $ = cheerio.load(html);
-  const stats = [0, 0, 0, 0, 0, 0];
+function getYellowRows(bigaRows) {
+  return bigaRows.slice(0, 6);
+}
 
-  $("tr").each((_, tr) => {
-    const tds = $(tr).find("td");
-    if (tds.length < 4) return;
+function updatePermanentRedStats(bigaRows) {
+  const memory = readMemory();
+  const stats = Array.isArray(memory.stats) ? memory.stats : [0, 0, 0, 0, 0, 0];
+  const seen = new Set(memory.seenKeys || []);
 
-    const firstText = $(tds[0]).text().replace(/\s+/g, "").trim();
-    if (!firstText.startsWith("開")) return;
+  const reviewRows = bigaRows.slice(6);
 
-    const hotCell = $(tds[3]);
-    const nums = parseNumbers(hotCell.text()).slice(0, 6);
-    if (nums.length !== 6) return;
+  reviewRows.forEach(row => {
+    const rowKey = row.open + "-" + row.nums.join(",");
+    if (seen.has(rowKey)) return;
 
-    hotCell.find("*").each((__, el) => {
-      const style = String($(el).attr("style") || "").toLowerCase();
-      const cls = String($(el).attr("class") || "").toLowerCase();
+    let hasHit = false;
+
+    row.hotCell.find("*").each((_, el) => {
+      const $el = row.hotCell.constructor(el);
+      const style = String($el.attr("style") || "").toLowerCase();
+      const cls = String($el.attr("class") || "").toLowerCase();
 
       const isRed =
-        style.includes("red") ||
+        style.includes("color:red") ||
+        style.includes("color: red") ||
         style.includes("#f00") ||
         style.includes("#ff0000") ||
-        style.includes("background") ||
+        style.includes("rgb(255,0,0)") ||
+        style.includes("rgb(255, 0, 0)") ||
         cls.includes("red");
 
       if (!isRed) return;
 
-      const redNums = parseNumbers($(el).text());
+      const redNums = parseNumbers($el.text());
 
       redNums.forEach(red => {
-        nums.forEach((n, index) => {
-          if (n === red) stats[index] += 1;
+        row.nums.forEach((n, index) => {
+          if (n === red && index >= 0 && index <= 5) {
+            stats[index] += 1;
+            hasHit = true;
+          }
         });
       });
     });
+
+    if (hasHit) seen.add(rowKey);
   });
 
-  if (stats.every(x => x === 0)) return [2, 3, 1, 1, 3, 2];
+  const newMemory = {
+    stats,
+    seenKeys: [...seen].slice(-500)
+  };
+
+  saveMemory(newMemory);
+
+  if (stats.every(x => x === 0)) {
+    return [2, 3, 1, 1, 3, 2];
+  }
+
   return stats;
 }
 
-function getCircleDelete(rows) {
+function getCircleDelete(yellowRows) {
   const del = new Set();
 
   const circlePositions = [
@@ -135,7 +174,7 @@ function getCircleDelete(rows) {
   ];
 
   circlePositions.forEach(([rowIndex, positions]) => {
-    const row = rows[rowIndex];
+    const row = yellowRows[rowIndex];
     if (!row) return;
 
     positions.forEach(pos => {
@@ -147,7 +186,7 @@ function getCircleDelete(rows) {
   return del;
 }
 
-function pickYellow4ByRedPositionStats(yellowRows, banned, redStats) {
+function pickYellow4(yellowRows, banned, redStats) {
   const score = {};
 
   yellowRows.forEach((row, rowIndex) => {
@@ -172,22 +211,16 @@ function pickYellow4ByRedPositionStats(yellowRows, banned, redStats) {
     .sort((a, b) => a - b);
 }
 
-function pickOutside2FromRemaining(remaining, yellowRows, latest3) {
+function pickOutside2(remaining, yellowRows, latest3) {
   const yellowSet = new Set(yellowRows.flatMap(r => r.nums));
   const tailScore = {};
-  const openScore = {};
+  const recentSet = new Set(latest3.flat());
 
   yellowRows.forEach(row => {
     row.tails.forEach(t => {
       tailScore[t] = (tailScore[t] || 0) + 1;
     });
-
-    row.nums.forEach(n => {
-      openScore[n] = (openScore[n] || 0) + 1;
-    });
   });
-
-  const recentSet = new Set(latest3.flat());
 
   return remaining
     .filter(n => !yellowSet.has(n))
@@ -200,13 +233,6 @@ function pickOutside2FromRemaining(remaining, yellowRows, latest3) {
 
       if (!recentSet.has(n)) score += 3;
 
-      if (
-        openScore[n - 1] ||
-        openScore[n + 1]
-      ) {
-        score += 3;
-      }
-
       return { num: n, score };
     })
     .sort((a, b) => b.score - a.score || a.num - b.num)
@@ -216,8 +242,8 @@ function pickOutside2FromRemaining(remaining, yellowRows, latest3) {
 }
 
 function analyze(pilioRows, yellowRows, redStats) {
-  if (!yellowRows || yellowRows.length === 0) {
-    throw new Error("Biga 不定位拖牌參考沒有抓到");
+  if (!yellowRows || yellowRows.length < 6) {
+    throw new Error("Biga 不定位拖牌參考沒有完整抓到6排");
   }
 
   const allBase = Array.from({ length: 38 }, (_, i) => i + 1);
@@ -226,36 +252,29 @@ function analyze(pilioRows, yellowRows, redStats) {
   const first = pilioRows[0] || [];
   const ninth = pilioRows[8] || [];
 
-  const firstDelete = new Set(first);
-  const ninthDelete = new Set(ninth);
-
   const plusDelete = new Set(
-    latest3
-      .flat()
-      .map(n => n + 1)
-      .filter(n => n >= 1 && n <= 38)
+    latest3.flat().map(n => n + 1).filter(n => n >= 1 && n <= 38)
   );
 
-  const circleDelete = getCircleDelete(yellowRows);
-
   const banned = new Set([
-    ...firstDelete,
-    ...ninthDelete,
+    ...first,
+    ...ninth,
     ...plusDelete,
-    ...circleDelete
+    ...getCircleDelete(yellowRows)
   ]);
 
-  const yellow4 = pickYellow4ByRedPositionStats(yellowRows, banned, redStats);
+  const yellow4 = pickYellow4(yellowRows, banned, redStats);
   const allRemoved = [...banned].sort((a, b) => a - b);
   const remaining = allBase.filter(n => !banned.has(n));
-  const outside2 = pickOutside2FromRemaining(remaining, yellowRows, latest3);
+  const outside2 = pickOutside2(remaining, yellowRows, latest3);
 
   return {
     latest3,
     yellow4,
     outside2,
     allRemoved,
-    remaining
+    remaining,
+    redPositionStats: redStats
   };
 }
 
@@ -266,7 +285,7 @@ app.get("/", (req, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>威力彩 黃色4隻分析</title>
+<title>威力彩 永久位置統計</title>
 <style>
 *{box-sizing:border-box}
 body{
@@ -286,7 +305,7 @@ body{
   box-shadow:0 25px 80px rgba(0,0,0,.35);
   backdrop-filter:blur(14px);
 }
-h1{text-align:center;font-size:30px;line-height:1.25;margin:8px 0 16px}
+h1{text-align:center;font-size:30px;margin:8px 0 16px}
 button{
   width:100%;
   padding:18px;
@@ -331,18 +350,18 @@ button{
 .ball.gray{background:#666}
 .ball.yellow{background:#ffd400;color:#2b1a00}
 .ball.blue{background:#1d8cff}
+.ball.green{background:#00a86b}
 .small{text-align:center;font-size:14px;line-height:1.7;margin-bottom:10px}
 </style>
 </head>
 <body>
-
 <div class="card">
-  <h1>威力彩<br>黃色4隻分析</h1>
+  <h1>威力彩<br>永久位置統計</h1>
 
   <button onclick="run()">重新自動更新抓牌</button>
 
   <div class="small">
-    最新3期｜黃色4隻｜刪除後外補2隻｜全部刪除｜剩下號碼
+    Pilio最新3期｜永久不定位回顧位置統計｜黃色4隻｜刪除後最可能2隻
   </div>
 
   <div id="status" class="status">自動更新中...</div>
@@ -381,6 +400,11 @@ async function run(){
     html += '</div>';
 
     html += '<div class="section">';
+    html += '<div class="title">永久不定位回顧位置統計</div>';
+    html += balls(data.redPositionStats,"green");
+    html += '</div>';
+
+    html += '<div class="section">';
     html += '<div class="title">最新3期號碼</div>';
     data.latest3.forEach((g,i)=>{
       html += '<div class="sub">第 ' + (i+1) + ' 期</div>';
@@ -389,7 +413,7 @@ async function run(){
     html += '</div>';
 
     html += '<div class="section">';
-    html += '<div class="title">刪除後外補最可能2隻</div>';
+    html += '<div class="title">刪除後最可能2隻</div>';
     html += balls(data.outside2,"blue");
     html += '</div>';
 
@@ -415,7 +439,6 @@ async function run(){
 
 window.onload = run;
 </script>
-
 </body>
 </html>
   `);
@@ -426,8 +449,9 @@ async function runAnalyze(res) {
     const pilioRows = await fetchPilioRows();
     const bigaHtml = await fetchBigaHtml();
 
-    const yellowRows = fetchLatestBigaYellowRowsFromHtml(bigaHtml);
-    const redStats = getRedPositionStatsFromBigaHtml(bigaHtml);
+    const bigaRows = parseBigaRows(bigaHtml);
+    const yellowRows = getYellowRows(bigaRows);
+    const redStats = updatePermanentRedStats(bigaRows);
 
     res.json(analyze(pilioRows, yellowRows, redStats));
   } catch (err) {
@@ -447,5 +471,5 @@ app.get("/api/analyze", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("Weilichai final server running on port " + PORT);
+  console.log("Weilichai permanent red-position server running on port " + PORT);
 });
