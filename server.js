@@ -12,6 +12,8 @@ const PORT = process.env.PORT || 3000;
 const PILIO_URL = "https://www.pilio.idv.tw/lto/list.asp";
 const BIGA_URL = "https://biga.com.tw/TOWMSG/showtowmsg_weili";
 
+const pad = n => String(n).padStart(2, "0");
+
 function uniq(arr) {
   return [...new Set(arr.map(Number))]
     .filter(n => n >= 1 && n <= 38)
@@ -24,9 +26,15 @@ function parseNumbers(text) {
     .filter(n => n >= 1 && n <= 38);
 }
 
+/* =========================
+   抓 Pilio 1～9期
+========================= */
+
 async function fetchPilioRows() {
   const res = await fetch(PILIO_URL, {
-    headers: { "user-agent": "Mozilla/5.0" }
+    headers: {
+      "user-agent": "Mozilla/5.0"
+    }
   });
 
   if (!res.ok) throw new Error("Pilio 抓取失敗：" + res.status);
@@ -43,54 +51,65 @@ async function fetchPilioRows() {
 
     if (nums.length === 6) {
       const key = nums.join(",");
-      if (!rows.some(r => r.key === key)) rows.push({ key, nums });
+      if (!rows.some(r => r.key === key)) {
+        rows.push({ key, nums });
+      }
     }
 
     if (rows.length >= 9) break;
   }
 
+  if (rows.length < 9) {
+    throw new Error("Pilio 1～9期沒有完整抓到");
+  }
+
   return rows.map(r => r.nums);
 }
 
+/* =========================
+   抓 Biga HTML
+========================= */
+
 async function fetchBigaHtml() {
   const res = await fetch(BIGA_URL, {
-    headers: { "user-agent": "Mozilla/5.0" }
+    headers: {
+      "user-agent": "Mozilla/5.0"
+    }
   });
 
   if (!res.ok) throw new Error("Biga 抓取失敗：" + res.status);
+
   return await res.text();
 }
 
-function getText(html) {
-  const $ = cheerio.load(html);
-  return $("body").text().replace(/\s+/g, " ");
-}
+/* =========================
+   最新不定位拖牌參考 = 黃色6排
+   直接抓表格前6排
+========================= */
 
-/* 最新黃色6排：只抓 不定位拖牌參考 */
 function fetchLatestBigaYellowRowsFromHtml(html) {
-  const text = getText(html);
-
-  const start = text.indexOf("不定位拖牌參考");
-  const end = text.indexOf("不定位拖牌回顧");
-
-  const area =
-    start >= 0 && end > start
-      ? text.slice(start, end)
-      : text;
-
+  const $ = cheerio.load(html);
   const rows = [];
 
-  const rowRegex =
-    /開\s*(\d{1,2})\s*下\s*1\s*期\s*([0-9,，、\s]{3,40})\s*([0-9,，、\s]{8,120})/g;
+  $("tr").each((_, tr) => {
+    const tds = $(tr).find("td");
 
-  let m;
+    if (tds.length < 4) return;
 
-  while ((m = rowRegex.exec(area)) !== null) {
-    const open = parseInt(m[1], 10);
-    const tails = parseNumbers(m[2]).map(n => n % 10);
-    const nums = uniq(parseNumbers(m[3])).slice(0, 6);
+    const firstText = $(tds[0]).text().replace(/\s+/g, "").trim();
 
-    if (open >= 1 && open <= 38 && nums.length === 6) {
+    if (!firstText.startsWith("開")) return;
+
+    const open = parseInt(firstText.replace("開", ""), 10);
+    const tails = parseNumbers($(tds[2]).text()).map(n => n % 10);
+    const nums = parseNumbers($(tds[3]).text()).slice(0, 6);
+
+    if (
+      open >= 1 &&
+      open <= 38 &&
+      tails.length >= 1 &&
+      nums.length === 6
+    ) {
       rows.push({
         open,
         tails: [...new Set(tails)],
@@ -98,40 +117,38 @@ function fetchLatestBigaYellowRowsFromHtml(html) {
       });
     }
 
-    if (rows.length >= 6) break;
-  }
+    if (rows.length >= 6) return false;
+  });
 
   return rows;
 }
 
-/* 灰色回顧：只統計 不定位拖牌回顧 的紅位 */
+/* =========================
+   不定位拖牌回顧
+   統計紅色出現在第幾位
+========================= */
+
 function getRedPositionStatsFromBigaHtml(html) {
   const $ = cheerio.load(html);
   const stats = [0, 0, 0, 0, 0, 0];
 
-  let inReview = false;
+  $("tr").each((_, tr) => {
+    const tds = $(tr).find("td");
 
-  $("body *").each((_, el) => {
-    const text = $(el).text().replace(/\s+/g, " ");
-
-    if (text.includes("不定位拖牌回顧")) {
-      inReview = true;
-    }
-
-    if (!inReview) return;
-
-    if (el.tagName !== "tr") return;
-
-    const tds = $(el).find("td");
     if (tds.length < 4) return;
 
-    const hotCell = tds.last();
+    const firstText = $(tds[0]).text().replace(/\s+/g, "").trim();
+
+    if (!firstText.startsWith("開")) return;
+
+    const hotCell = $(tds[3]);
     const nums = parseNumbers(hotCell.text()).slice(0, 6);
+
     if (nums.length !== 6) return;
 
-    hotCell.find("*").each((__, child) => {
-      const style = String($(child).attr("style") || "").toLowerCase();
-      const cls = String($(child).attr("class") || "").toLowerCase();
+    hotCell.find("*").each((__, el) => {
+      const style = String($(el).attr("style") || "").toLowerCase();
+      const cls = String($(el).attr("class") || "").toLowerCase();
 
       const isRed =
         style.includes("red") ||
@@ -142,16 +159,19 @@ function getRedPositionStatsFromBigaHtml(html) {
 
       if (!isRed) return;
 
-      const redNums = parseNumbers($(child).text());
+      const redNums = parseNumbers($(el).text());
 
       redNums.forEach(red => {
         nums.forEach((n, index) => {
-          if (n === red) stats[index] += 1;
+          if (n === red) {
+            stats[index] += 1;
+          }
         });
       });
     });
   });
 
+  // 如果網站紅色樣式抓不到，給保底位置權重
   if (stats.every(x => x === 0)) {
     return [2, 3, 1, 1, 3, 2];
   }
@@ -159,7 +179,10 @@ function getRedPositionStatsFromBigaHtml(html) {
   return stats;
 }
 
-/* 圈位第一刪除 */
+/* =========================
+   圈位第一刪除
+========================= */
+
 function getCircleDelete(rows) {
   const del = new Set();
 
@@ -175,14 +198,19 @@ function getCircleDelete(rows) {
 
     positions.forEach(pos => {
       const n = row.nums[pos];
-      if (n >= 1 && n <= 38) del.add(n);
+      if (n >= 1 && n <= 38) {
+        del.add(n);
+      }
     });
   });
 
   return del;
 }
 
-/* 黃色4隻：用紅位位置加權 */
+/* =========================
+   黃色4隻分析
+========================= */
+
 function pickYellow4ByRedPositionStats(yellowRows, banned, redStats) {
   const score = {};
 
@@ -192,24 +220,41 @@ function pickYellow4ByRedPositionStats(yellowRows, banned, redStats) {
 
       if (!score[n]) score[n] = 0;
 
+      // 黃色基本分
       score[n] += 10;
+
+      // 灰色紅位位置統計加權
       score[n] += (redStats[posIndex] || 0) * 8;
 
-      if (row.tails.includes(n % 10)) score[n] += 5;
-      if (rowIndex >= 3) score[n] += 2;
+      // 熱門尾數加權
+      if (row.tails.includes(n % 10)) {
+        score[n] += 5;
+      }
+
+      // 後面排數微加權
+      if (rowIndex >= 3) {
+        score[n] += 2;
+      }
     });
   });
 
   return Object.entries(score)
-    .map(([num, s]) => ({ num: Number(num), score: s }))
+    .map(([num, s]) => ({
+      num: Number(num),
+      score: s
+    }))
     .sort((a, b) => b.score - a.score || a.num - b.num)
     .slice(0, 4)
     .map(x => x.num)
     .sort((a, b) => a - b);
 }
 
+/* =========================
+   主分析
+========================= */
+
 function analyze(pilioRows, yellowRows, redStats) {
-  if (yellowRows.length === 0) {
+  if (!yellowRows || yellowRows.length === 0) {
     throw new Error("Biga 不定位拖牌參考沒有抓到");
   }
 
@@ -223,7 +268,10 @@ function analyze(pilioRows, yellowRows, redStats) {
   const ninthDelete = new Set(ninth);
 
   const plusDelete = new Set(
-    latest3.flat().map(n => n + 1).filter(n => n >= 1 && n <= 38)
+    latest3
+      .flat()
+      .map(n => n + 1)
+      .filter(n => n >= 1 && n <= 38)
   );
 
   const circleDelete = getCircleDelete(yellowRows);
@@ -235,7 +283,12 @@ function analyze(pilioRows, yellowRows, redStats) {
     ...circleDelete
   ]);
 
-  const yellow4 = pickYellow4ByRedPositionStats(yellowRows, banned, redStats);
+  const yellow4 = pickYellow4ByRedPositionStats(
+    yellowRows,
+    banned,
+    redStats
+  );
+
   const allRemoved = [...banned].sort((a, b) => a - b);
   const remaining = allBase.filter(n => !banned.has(n));
 
@@ -245,6 +298,10 @@ function analyze(pilioRows, yellowRows, redStats) {
     remaining
   };
 }
+
+/* =========================
+   UI
+========================= */
 
 app.get("/", (req, res) => {
   res.send(`
@@ -273,7 +330,12 @@ body{
   box-shadow:0 25px 80px rgba(0,0,0,.35);
   backdrop-filter:blur(14px);
 }
-h1{text-align:center;font-size:30px;line-height:1.25;margin:8px 0 16px}
+h1{
+  text-align:center;
+  font-size:30px;
+  line-height:1.25;
+  margin:8px 0 16px;
+}
 button{
   width:100%;
   padding:18px;
@@ -300,8 +362,16 @@ button{
   background:rgba(255,255,255,.9);
   color:#8a004c;
 }
-.title{font-size:22px;font-weight:900;margin-bottom:12px}
-.balls{display:flex;flex-wrap:wrap;gap:10px}
+.title{
+  font-size:22px;
+  font-weight:900;
+  margin-bottom:12px;
+}
+.balls{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+}
 .ball{
   width:54px;
   height:54px;
@@ -314,12 +384,23 @@ button{
   font-size:21px;
   font-weight:900;
 }
-.ball.gray{background:#666}
-.ball.yellow{background:#ffd400;color:#2b1a00}
-.small{text-align:center;font-size:14px;line-height:1.7;margin-bottom:10px}
+.ball.gray{
+  background:#666;
+}
+.ball.yellow{
+  background:#ffd400;
+  color:#2b1a00;
+}
+.small{
+  text-align:center;
+  font-size:14px;
+  line-height:1.7;
+  margin-bottom:10px;
+}
 </style>
 </head>
 <body>
+
 <div class="card">
   <h1>威力彩<br>黃色4隻分析</h1>
 
@@ -334,10 +415,15 @@ button{
 </div>
 
 <script>
-function pad(n){ return String(n).padStart(2,"0"); }
+function pad(n){
+  return String(n).padStart(2,"0");
+}
 
 function balls(arr, cls=""){
-  if(!arr || arr.length === 0) return "<div>無</div>";
+  if(!arr || arr.length === 0){
+    return "<div>無</div>";
+  }
+
   return '<div class="balls">' +
     arr.map(n => '<div class="ball '+cls+'">' + pad(n) + '</div>').join("") +
   '</div>';
@@ -356,7 +442,9 @@ async function run(){
 
     const data = await res.json();
 
-    if(data.error) throw new Error(data.detail || data.error);
+    if(data.error){
+      throw new Error(data.detail || data.error);
+    }
 
     let html = "";
 
@@ -387,10 +475,15 @@ async function run(){
 
 window.onload = run;
 </script>
+
 </body>
 </html>
   `);
 });
+
+/* =========================
+   API
+========================= */
 
 async function runAnalyze(res) {
   try {
@@ -400,7 +493,9 @@ async function runAnalyze(res) {
     const yellowRows = fetchLatestBigaYellowRowsFromHtml(bigaHtml);
     const redStats = getRedPositionStatsFromBigaHtml(bigaHtml);
 
-    res.json(analyze(pilioRows, yellowRows, redStats));
+    const result = analyze(pilioRows, yellowRows, redStats);
+
+    res.json(result);
   } catch (err) {
     res.status(500).json({
       error: "分析失敗",
@@ -409,9 +504,14 @@ async function runAnalyze(res) {
   }
 }
 
-app.post("/api/analyze", async (req, res) => runAnalyze(res));
-app.get("/api/analyze", async (req, res) => runAnalyze(res));
+app.post("/api/analyze", async (req, res) => {
+  await runAnalyze(res);
+});
+
+app.get("/api/analyze", async (req, res) => {
+  await runAnalyze(res);
+});
 
 app.listen(PORT, () => {
-  console.log("Weilichai yellow4 final server running on port " + PORT);
+  console.log("Weilichai yellow4 full final server running on port " + PORT);
 });
