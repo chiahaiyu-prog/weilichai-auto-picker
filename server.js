@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import * as cheerio from "cheerio";
-import fs from "fs";
 
 const app = express();
 app.use(cors());
@@ -12,7 +11,9 @@ const PORT = process.env.PORT || 3000;
 
 const PILIO_URL = "https://www.pilio.idv.tw/lto/list.asp";
 const BIGA_URL = "https://biga.com.tw/TOWMSG/showtowmsg_weili";
-const MEMORY_FILE = "./red-position-memory.json";
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 function parseNumbers(text) {
   return (String(text).match(/\b\d{1,2}\b/g) || [])
@@ -20,21 +21,30 @@ function parseNumbers(text) {
     .filter(n => n >= 1 && n <= 38);
 }
 
-function readMemory() {
-  try {
-    if (!fs.existsSync(MEMORY_FILE)) {
-      return { stats: [0, 0, 0, 0, 0, 0], seenKeys: [] };
-    }
-    return JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
-  } catch {
-    return { stats: [0, 0, 0, 0, 0, 0], seenKeys: [] };
+async function supabaseFetch(path, options = {}) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("缺少 SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY");
   }
-}
 
-function saveMemory(memory) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+      ...(options.headers || {})
+    }
+  });
+
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Supabase 錯誤 ${res.status}: ${text}`);
+
   try {
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
-  } catch {}
+    return text ? JSON.parse(text) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function fetchPilioRows() {
@@ -94,7 +104,8 @@ function parseBigaRows(html) {
         open,
         tails: [...new Set(tails)],
         nums,
-        hotCell
+        hotHtml: hotCell.html() || "",
+        hotText: hotCell.text()
       });
     }
   });
@@ -106,56 +117,108 @@ function getYellowRows(bigaRows) {
   return bigaRows.slice(0, 6);
 }
 
-function updatePermanentRedStats(bigaRows) {
-  const memory = readMemory();
-  const stats = Array.isArray(memory.stats) ? memory.stats : [0, 0, 0, 0, 0, 0];
-  const seen = new Set(memory.seenKeys || []);
+async function loadPermanentStats() {
+  const rows = await supabaseFetch("red_position_stats?select=position,count&order=position.asc");
 
-  const reviewRows = bigaRows.slice(6);
+  const stats = [0, 0, 0, 0, 0, 0];
 
-  reviewRows.forEach(row => {
-    const rowKey = row.open + "-" + row.nums.join(",");
-    if (seen.has(rowKey)) return;
-
-    let hasHit = false;
-
-    row.hotCell.find("*").each((_, el) => {
-      const $el = row.hotCell.constructor(el);
-      const style = String($el.attr("style") || "").toLowerCase();
-      const cls = String($el.attr("class") || "").toLowerCase();
-
-      const isRed =
-        style.includes("color:red") ||
-        style.includes("color: red") ||
-        style.includes("#f00") ||
-        style.includes("#ff0000") ||
-        style.includes("rgb(255,0,0)") ||
-        style.includes("rgb(255, 0, 0)") ||
-        cls.includes("red");
-
-      if (!isRed) return;
-
-      const redNums = parseNumbers($el.text());
-
-      redNums.forEach(red => {
-        row.nums.forEach((n, index) => {
-          if (n === red && index >= 0 && index <= 5) {
-            stats[index] += 1;
-            hasHit = true;
-          }
-        });
-      });
-    });
-
-    if (hasHit) seen.add(rowKey);
+  rows.forEach(r => {
+    const pos = Number(r.position);
+    if (pos >= 1 && pos <= 6) {
+      stats[pos - 1] = Number(r.count || 0);
+    }
   });
 
-  const newMemory = {
-    stats,
-    seenKeys: [...seen].slice(-500)
-  };
+  return stats;
+}
 
-  saveMemory(newMemory);
+async function loadSeenKeys() {
+  const rows = await supabaseFetch("red_seen_keys?select=row_key&limit=10000");
+  return new Set(rows.map(r => r.row_key));
+}
+
+function getRedHitsFromRow(row) {
+  const $ = cheerio.load(`<div>${row.hotHtml}</div>`);
+  const hits = [];
+
+  $("*").each((_, el) => {
+    const node = $(el);
+    const style = String(node.attr("style") || "").toLowerCase();
+    const cls = String(node.attr("class") || "").toLowerCase();
+
+    const isRed =
+      style.includes("color:red") ||
+      style.includes("color: red") ||
+      style.includes("#f00") ||
+      style.includes("#ff0000") ||
+      style.includes("rgb(255,0,0)") ||
+      style.includes("rgb(255, 0, 0)") ||
+      style.includes("background:red") ||
+      style.includes("background-color:red") ||
+      cls.includes("red");
+
+    if (!isRed) return;
+
+    const redNums = parseNumbers(node.text());
+
+    redNums.forEach(red => {
+      row.nums.forEach((n, index) => {
+        if (n === red && index >= 0 && index <= 5) {
+          hits.push(index);
+        }
+      });
+    });
+  });
+
+  return hits;
+}
+
+async function updatePermanentRedStats(bigaRows) {
+  const stats = await loadPermanentStats();
+  const seen = await loadSeenKeys();
+
+  const reviewRows = bigaRows.slice(6);
+  const newSeenRows = [];
+
+  reviewRows.forEach(row => {
+    const rowKey = `${row.open}-${row.nums.join(",")}`;
+    if (seen.has(rowKey)) return;
+
+    const hits = getRedHitsFromRow(row);
+
+    if (hits.length > 0) {
+      hits.forEach(index => {
+        stats[index] += 1;
+      });
+
+      seen.add(rowKey);
+      newSeenRows.push({ row_key: rowKey });
+    }
+  });
+
+  const statRows = stats.map((count, i) => ({
+    position: i + 1,
+    count,
+    updated_at: new Date().toISOString()
+  }));
+
+  await supabaseFetch("red_position_stats?on_conflict=position", {
+    method: "POST",
+    headers: {
+      Prefer: "resolution=merge-duplicates,return=representation"
+    },
+    body: JSON.stringify(statRows)
+  });
+
+  if (newSeenRows.length > 0) {
+    await supabaseFetch("red_seen_keys?on_conflict=row_key", {
+      method: "POST",
+      headers: {
+        Prefer: "resolution=ignore-duplicates,return=minimal"
+      },
+      body: JSON.stringify(newSeenRows)
+    });
+  }
 
   if (stats.every(x => x === 0)) {
     return [2, 3, 1, 1, 3, 2];
@@ -285,7 +348,7 @@ app.get("/", (req, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>威力彩 永久位置統計</title>
+<title>威力彩 Supabase 永久統計</title>
 <style>
 *{box-sizing:border-box}
 body{
@@ -356,12 +419,12 @@ button{
 </head>
 <body>
 <div class="card">
-  <h1>威力彩<br>永久位置統計</h1>
+  <h1>威力彩<br>Supabase 永久統計</h1>
 
   <button onclick="run()">重新自動更新抓牌</button>
 
   <div class="small">
-    Pilio最新3期｜永久不定位回顧位置統計｜黃色4隻｜刪除後最可能2隻
+    Supabase永久位置統計｜黃色4隻｜最新3期｜刪除後最可能2隻
   </div>
 
   <div id="status" class="status">自動更新中...</div>
@@ -451,7 +514,7 @@ async function runAnalyze(res) {
 
     const bigaRows = parseBigaRows(bigaHtml);
     const yellowRows = getYellowRows(bigaRows);
-    const redStats = updatePermanentRedStats(bigaRows);
+    const redStats = await updatePermanentRedStats(bigaRows);
 
     res.json(analyze(pilioRows, yellowRows, redStats));
   } catch (err) {
@@ -471,5 +534,5 @@ app.get("/api/analyze", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("Weilichai permanent red-position server running on port " + PORT);
+  console.log("Weilichai Supabase permanent server running on port " + PORT);
 });
